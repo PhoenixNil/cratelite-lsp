@@ -1,0 +1,20 @@
+[package]
+name = "cratelite-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cratelite-lsp"
+path = "src/main.rs"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+flate2 = "1"
+semver = "1"
+dirs = "5"
+async-trait = "0.1"
+taplo = "0.14"
