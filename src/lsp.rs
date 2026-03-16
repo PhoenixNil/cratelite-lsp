@@ -3,9 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer};
+use tower_lsp::{jsonrpc::Result, lsp_types::*, Client, LanguageServer};
 
 use crate::crate_index::CrateIndex;
 use crate::feature_index::FeatureIndex;
@@ -39,18 +37,10 @@ impl LanguageServer for Backend {
                 )),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(
-                        // Trigger on characters that commonly appear at the start
-                        // of a crate name or inside feature/version strings.
-                        vec![
-                            "\"".into(), "'".into(), ",".into(),
-                            "-".into(), "_".into(),
-                            "a".into(), "b".into(), "c".into(), "d".into(), "e".into(),
-                            "f".into(), "g".into(), "h".into(), "i".into(), "j".into(),
-                            "k".into(), "l".into(), "m".into(), "n".into(), "o".into(),
-                            "p".into(), "q".into(), "r".into(), "s".into(), "t".into(),
-                            "u".into(), "v".into(), "w".into(), "x".into(), "y".into(),
-                            "z".into(),
-                        ],
+                        IntoIterator::into_iter(['"', '\'', ',', '-', '_'])
+                            .chain('a'..='z')
+                            .map(|c| c.to_string())
+                            .collect(),
                     ),
                     resolve_provider: Some(false),
                     ..Default::default()
@@ -91,7 +81,10 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.documents.write().await.remove(&params.text_document.uri);
+        self.documents
+            .write()
+            .await
+            .remove(&params.text_document.uri);
     }
 
     // ── completions ────────────────────────────────────────────────────────
@@ -120,7 +113,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        // ── 1. Feature completions (inline table: `{ version = "…", features = ["…"] }`)
+        //  1. Feature completions (inline table: `{ version = "…", features = ["…"] }`)
         if let Some(ctx) = toml_context::get_feature_completion_context(&text, line, character) {
             let features = self
                 .feature_index
@@ -146,7 +139,7 @@ impl LanguageServer for Backend {
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
-        // ── 2. Crate-name completions (typing the key on the left of `=`) ──
+        //  2. Crate-name completions (typing the key on the left of `=`)
         let line_text: &str = text.lines().nth(line as usize).unwrap_or("");
         if toml_context::is_typing_crate_name(line_text, character) {
             let ctx = toml_context::get_crate_name_context(line_text, character);
@@ -155,7 +148,7 @@ impl LanguageServer for Backend {
                 let items: Vec<CompletionItem> = results
                     .into_iter()
                     .map(|e| {
-                        let insert = format!("{} = \"{}\"", e.name, e.version);
+                        let insert = e.name.clone();
                         CompletionItem {
                             label: e.name.clone(),
                             kind: Some(CompletionItemKind::MODULE),
@@ -176,8 +169,10 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        // ── 3. Version-string completion (`crate_name = "…"`) ──────────────
-        if let Some(ctx) = toml_context::get_version_context(&text, line, character) {
+        // 3. Version-string completion (inline: `{ version = "…" }` or simple: `crate = "…"`)
+        if let Some(ctx) = toml_context::get_inline_version_context(&text, line, character)
+            .or_else(|| toml_context::get_version_context(&text, line, character))
+        {
             if let Some(version) = self.crate_index.get_latest_version(&ctx.crate_name).await {
                 if version.starts_with(&ctx.version_prefix) {
                     let item = CompletionItem {

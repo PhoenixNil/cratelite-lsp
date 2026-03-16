@@ -15,6 +15,5 @@ serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 flate2 = "1"
 semver = "1"
-dirs = "5"
+dirs = "6"
 async-trait = "0.1"
-taplo = "0.14"

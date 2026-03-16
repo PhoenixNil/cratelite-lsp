@@ -2,7 +2,6 @@ mod crate_index;
 mod feature_index;
 mod lsp;
 mod toml_context;
-mod toml_context_fallback;
 
 use tower_lsp::{LspService, Server};
 
