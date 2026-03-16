@@ -153,6 +153,7 @@ impl LanguageServer for Backend {
                             label: e.name.clone(),
                             kind: Some(CompletionItemKind::MODULE),
                             detail: Some(format!("v{}", e.version)),
+                            sort_text: Some(format!("{:08}", e.rank)), //  0 padded rank for sorting, 8 digits
                             text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                                 range: Range::new(
                                     Position::new(line, ctx.start_character),
