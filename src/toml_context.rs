@@ -97,8 +97,8 @@ fn strip_comment(line: &str) -> &str {
 /// Scans upward from `line` to find the nearest `[section]` header.
 /// Returns `true` if it belongs to a dependencies section.
 pub fn is_in_dependencies_section(text: &str, line: u32) -> bool {
-    let all_lines: Vec<&str> = text.lines().collect();
-    let start = (line as usize).min(all_lines.len().saturating_sub(1));
+    let all_lines: Vec<&str> = text.lines().take(line as usize + 1).collect();
+    let start = all_lines.len().saturating_sub(1);
 
     for i in (0..=start).rev() {
         let trimmed = strip_comment(all_lines[i]).trim();
@@ -592,13 +592,13 @@ fn find_inline_dep_start(text: &str, line: u32, character: u32) -> Option<Inline
     None
 }
 
-/// Returns version-completion context if the cursor is inside
-/// `version = "..."` within an inline dependency table like `serde = { version = "..." }`.
-pub fn get_inline_version_context(text: &str, line: u32, character: u32) -> Option<VersionContext> {
-    if !is_in_dependencies_section(text, line) {
-        return None;
-    }
+struct ParsedInlineDep {
+    dep_key: String,
+    table: InlineTable,
+    ls: Vec<usize>,
+}
 
+fn parse_inline_dep(text: &str, line: u32, character: u32) -> Option<ParsedInlineDep> {
     let dep_start = find_inline_dep_start(text, line, character)?;
     let bytes = text.as_bytes();
     let ls = line_starts(text);
@@ -607,14 +607,25 @@ pub fn get_inline_version_context(text: &str, line: u32, character: u32) -> Opti
     let close = find_matching(bytes, dep_start.open_brace, b'{', b'}', bytes.len())?;
     let table = parse_inline_table(bytes, dep_start.open_brace, close, cursor_offset);
 
-    let (prefix, content_start, content_end) = table.version_cursor?;
+    Some(ParsedInlineDep {
+        dep_key: dep_start.dep_key,
+        table,
+        ls,
+    })
+}
+
+/// Returns version-completion context if the cursor is inside
+/// `version = "..."` within an inline dependency table like `serde = { version = "..." }`.
+pub fn get_inline_version_context(text: &str, line: u32, character: u32) -> Option<VersionContext> {
+    let parsed = parse_inline_dep(text, line, character)?;
+    let (prefix, content_start, content_end) = parsed.table.version_cursor?;
 
     Some(VersionContext {
-        crate_name: table.package_name.unwrap_or(dep_start.dep_key),
+        crate_name: parsed.table.package_name.unwrap_or(parsed.dep_key),
         version_prefix: prefix,
         range: Range::new(
-            position_of(&ls, content_start),
-            position_of(&ls, content_end),
+            position_of(&parsed.ls, content_start),
+            position_of(&parsed.ls, content_end),
         ),
     })
 }
@@ -626,28 +637,17 @@ pub fn get_feature_completion_context(
     line: u32,
     character: u32,
 ) -> Option<FeatureCompletionContext> {
-    if !is_in_dependencies_section(text, line) {
-        return None;
-    }
-
-    let dep_start = find_inline_dep_start(text, line, character)?;
-    let bytes = text.as_bytes();
-    let ls = line_starts(text);
-    let cursor_offset = offset_of(&ls, line, character);
-
-    let close = find_matching(bytes, dep_start.open_brace, b'{', b'}', bytes.len())?;
-    let table = parse_inline_table(bytes, dep_start.open_brace, close, cursor_offset);
-
-    let fa = table.feature_array?;
-    let version = table.version.filter(|v| !v.trim().is_empty())?;
+    let parsed = parse_inline_dep(text, line, character)?;
+    let fa = parsed.table.feature_array?;
+    let version = parsed.table.version.filter(|v| !v.trim().is_empty())?;
 
     let range = Range::new(
-        position_of(&ls, fa.content_start),
-        position_of(&ls, fa.content_end),
+        position_of(&parsed.ls, fa.content_start),
+        position_of(&parsed.ls, fa.content_end),
     );
 
     Some(FeatureCompletionContext {
-        crate_name: table.package_name.unwrap_or(dep_start.dep_key),
+        crate_name: parsed.table.package_name.unwrap_or(parsed.dep_key),
         version_requirement: version,
         feature_prefix: fa.feature_prefix,
         range,

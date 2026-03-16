@@ -3,7 +3,8 @@
 /// Fetches sparse crates.io index entries and resolves feature lists for a
 /// given crate + Cargo version requirement.
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Deserialize, Clone)]
@@ -20,7 +21,7 @@ struct SparseRecord {
 pub struct FeatureIndex {
     client: reqwest::Client,
     /// `None` means a previous fetch failed (don't retry immediately).
-    cache: RwLock<HashMap<String, Option<Vec<SparseRecord>>>>,
+    cache: RwLock<HashMap<String, Option<Arc<Vec<SparseRecord>>>>>,
 }
 
 impl FeatureIndex {
@@ -46,7 +47,7 @@ impl FeatureIndex {
         }
 
         // Fetch from crates.io sparse index
-        let records = self.fetch_records(&name).await.ok();
+        let records = self.fetch_records(&name).await.ok().map(Arc::new);
 
         // Store result (even None, so we don't hammer the network)
         self.cache.write().await.insert(name.clone(), records.clone());
@@ -104,10 +105,11 @@ fn resolve_features(records: &[SparseRecord], version_req: &str) -> Option<Vec<S
         .max_by(|(a, _), (b, _)| a.cmp(b))
         .map(|(_, r)| r)?;
 
+    let mut seen: HashSet<&str> = record.features.keys().map(|k| k.as_str()).collect();
     let mut features: Vec<String> = record.features.keys().cloned().collect();
     if let Some(f2) = &record.features2 {
         for key in f2.keys() {
-            if !features.contains(key) {
+            if seen.insert(key.as_str()) {
                 features.push(key.clone());
             }
         }

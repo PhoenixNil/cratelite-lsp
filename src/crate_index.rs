@@ -14,14 +14,14 @@ const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 #[derive(Clone)]
 pub struct CrateEntry {
     pub name: String,
+    pub name_lower: String,
     pub version: String,
     #[allow(dead_code)]
     pub rank: usize,
 }
 
 pub struct CrateIndex {
-    buckets: RwLock<HashMap<String, Vec<CrateEntry>>>,
-    loaded: RwLock<bool>,
+    buckets: RwLock<Option<HashMap<String, Vec<CrateEntry>>>>,
 }
 
 // ── cache paths ────────────────────────────────────────────────────────────
@@ -72,8 +72,7 @@ fn save_meta() {
 impl CrateIndex {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            buckets: RwLock::new(HashMap::new()),
-            loaded: RwLock::new(false),
+            buckets: RwLock::new(None),
         })
     }
 
@@ -143,34 +142,38 @@ impl CrateIndex {
                 continue;
             }
 
-            let prefix = name[..2].to_lowercase();
+            let name_lower = name.to_lowercase();
+            let prefix = name_lower[..2].to_string();
             map.entry(prefix).or_default().push(CrateEntry {
                 name: name.to_string(),
+                name_lower,
                 version: version.to_string(),
                 rank,
             });
         }
 
-        *self.buckets.write().await = map;
-        *self.loaded.write().await = true;
+        *self.buckets.write().await = Some(map);
     }
 
     // ── query methods ──────────────────────────────────────────────────────
 
     pub async fn search(&self, query: &str, max_results: usize) -> Vec<CrateEntry> {
-        if !*self.loaded.read().await || query.len() < 2 {
+        if query.len() < 2 {
             return vec![];
         }
         let q = query.to_lowercase();
         let prefix = &q[..2];
         let buckets = self.buckets.read().await;
-        let Some(bucket) = buckets.get(prefix) else {
+        let Some(map) = buckets.as_ref() else {
+            return vec![];
+        };
+        let Some(bucket) = map.get(prefix) else {
             return vec![];
         };
 
         let mut results = Vec::new();
         for entry in bucket {
-            if entry.name.to_lowercase().starts_with(q.as_str()) {
+            if entry.name_lower.starts_with(q.as_str()) {
                 results.push(entry.clone());
                 if results.len() >= max_results {
                     break;
@@ -181,23 +184,16 @@ impl CrateIndex {
     }
 
     pub async fn get_latest_version(&self, crate_name: &str) -> Option<String> {
-        if !*self.loaded.read().await {
-            return None;
-        }
         let q = crate_name.to_lowercase();
-        let buckets = self.buckets.read().await;
         if q.len() < 2 {
             return None;
         }
-        let bucket = buckets.get(&q[..2])?;
+        let buckets = self.buckets.read().await;
+        let map = buckets.as_ref()?;
+        let bucket = map.get(&q[..2])?;
         bucket
             .iter()
-            .find(|e| e.name.to_lowercase() == q)
+            .find(|e| e.name_lower == q)
             .map(|e| e.version.clone())
-    }
-
-    #[allow(dead_code)]
-    pub async fn is_loaded(&self) -> bool {
-        *self.loaded.read().await
     }
 }
