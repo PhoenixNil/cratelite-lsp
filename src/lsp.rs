@@ -165,7 +165,10 @@ impl LanguageServer for Backend {
                         }
                     })
                     .collect();
-                return Ok(Some(CompletionResponse::Array(items)));
+                return Ok(Some(CompletionResponse::List(CompletionList {
+                    is_incomplete: true,
+                    items,
+                })));
             }
             return Ok(None);
         }
