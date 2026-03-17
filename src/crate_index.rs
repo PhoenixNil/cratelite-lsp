@@ -10,6 +10,8 @@ use tokio::sync::RwLock;
 const INDEX_URL: &str =
     "https://github.com/PhoenixNil/Autoupdate-cratelite/releases/download/latest/crates-index.txt.gz";
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+type BucketedCrateIndex = HashMap<String, Vec<CrateEntry>>;
+type SharedCrateIndex = RwLock<Option<BucketedCrateIndex>>;
 
 #[derive(Clone)]
 pub struct CrateEntry {
@@ -21,7 +23,7 @@ pub struct CrateEntry {
 }
 
 pub struct CrateIndex {
-    buckets: RwLock<Option<HashMap<String, Vec<CrateEntry>>>>,
+    buckets: SharedCrateIndex,
 }
 
 // ── cache paths ────────────────────────────────────────────────────────────

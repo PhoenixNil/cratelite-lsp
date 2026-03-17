@@ -6,12 +6,14 @@ use tower_lsp::lsp_types::{Position, Range};
 
 // ── public output types ────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct CrateNameContext {
     pub prefix: String,
     pub start_character: u32,
     pub end_character: u32,
 }
 
+#[derive(Debug)]
 pub struct FeatureCompletionContext {
     pub crate_name: String,
     pub version_requirement: String,
@@ -20,10 +22,18 @@ pub struct FeatureCompletionContext {
     pub selected_features: Vec<String>,
 }
 
+#[derive(Debug)]
 pub struct VersionContext {
     pub crate_name: String,
     pub version_prefix: String,
     pub range: Range,
+}
+
+#[derive(Debug)]
+pub enum CompletionContext {
+    CrateName(CrateNameContext),
+    Version(VersionContext),
+    Feature(FeatureCompletionContext),
 }
 
 // ── byte-offset helpers ────────────────────────────────────────────────────
@@ -96,7 +106,7 @@ fn strip_comment(line: &str) -> &str {
 
 /// Scans upward from `line` to find the nearest `[section]` header.
 /// Returns `true` if it belongs to a dependencies section.
-pub fn is_in_dependencies_section(text: &str, line: u32) -> bool {
+fn is_in_dependencies_section(text: &str, line: u32) -> bool {
     let all_lines: Vec<&str> = text.lines().take(line as usize + 1).collect();
     let start = all_lines.len().saturating_sub(1);
 
@@ -122,7 +132,7 @@ pub fn is_in_dependencies_section(text: &str, line: u32) -> bool {
 
 /// Returns `true` when the cursor is on the key side of an assignment
 /// (i.e. no `=` has appeared yet on this line before the cursor).
-pub fn is_typing_crate_name(line_text: &str, cursor_char: u32) -> bool {
+fn is_typing_crate_name(line_text: &str, cursor_char: u32) -> bool {
     let cursor = (cursor_char as usize).min(line_text.len());
     let before = &line_text[..cursor];
     if before.contains('=') {
@@ -132,7 +142,7 @@ pub fn is_typing_crate_name(line_text: &str, cursor_char: u32) -> bool {
 }
 
 /// Returns the crate-name prefix/extent at the cursor.
-pub fn get_crate_name_context(line_text: &str, cursor_char: u32) -> CrateNameContext {
+fn get_crate_name_context(line_text: &str, cursor_char: u32) -> CrateNameContext {
     let bytes = line_text.as_bytes();
     let cursor = (cursor_char as usize).min(bytes.len());
 
@@ -156,7 +166,7 @@ pub fn get_crate_name_context(line_text: &str, cursor_char: u32) -> CrateNameCon
 
 /// Detects `crate_name = "version_here"` where cursor is inside the string.
 /// Returns `None` for keys like `version`, `path`, `git` (handled elsewhere).
-pub fn get_version_context(text: &str, line: u32, character: u32) -> Option<VersionContext> {
+fn get_simple_version_context(text: &str, line: u32, character: u32) -> Option<VersionContext> {
     let all_lines: Vec<&str> = text.lines().collect();
     let line_text = all_lines.get(line as usize)?;
     let stripped = strip_comment(line_text);
@@ -616,30 +626,31 @@ fn parse_inline_dep(text: &str, line: u32, character: u32) -> Option<ParsedInlin
 
 /// Returns version-completion context if the cursor is inside
 /// `version = "..."` within an inline dependency table like `serde = { version = "..." }`.
-pub fn get_inline_version_context(text: &str, line: u32, character: u32) -> Option<VersionContext> {
-    let parsed = parse_inline_dep(text, line, character)?;
-    let (prefix, content_start, content_end) = parsed.table.version_cursor?;
+fn get_inline_version_context(parsed: &ParsedInlineDep) -> Option<VersionContext> {
+    let (prefix, content_start, content_end) = parsed.table.version_cursor.as_ref()?;
 
     Some(VersionContext {
-        crate_name: parsed.table.package_name.unwrap_or(parsed.dep_key),
-        version_prefix: prefix,
+        crate_name: parsed
+            .table
+            .package_name
+            .clone()
+            .unwrap_or_else(|| parsed.dep_key.clone()),
+        version_prefix: prefix.clone(),
         range: Range::new(
-            position_of(&parsed.ls, content_start),
-            position_of(&parsed.ls, content_end),
+            position_of(&parsed.ls, *content_start),
+            position_of(&parsed.ls, *content_end),
         ),
     })
 }
 
 /// Main entry point: returns feature-completion context if the cursor is
 /// inside a `features = ["..."]` array inside an inline dependency table.
-pub fn get_feature_completion_context(
-    text: &str,
-    line: u32,
-    character: u32,
-) -> Option<FeatureCompletionContext> {
-    let parsed = parse_inline_dep(text, line, character)?;
-    let fa = parsed.table.feature_array?;
-    let version = parsed.table.version.filter(|v| !v.trim().is_empty())?;
+fn get_feature_completion_context(parsed: &ParsedInlineDep) -> Option<FeatureCompletionContext> {
+    let fa = parsed.table.feature_array.as_ref()?;
+    let version = parsed.table.version.as_ref()?.trim();
+    if version.is_empty() {
+        return None;
+    }
 
     let range = Range::new(
         position_of(&parsed.ls, fa.content_start),
@@ -647,10 +658,210 @@ pub fn get_feature_completion_context(
     );
 
     Some(FeatureCompletionContext {
-        crate_name: parsed.table.package_name.unwrap_or(parsed.dep_key),
-        version_requirement: version,
-        feature_prefix: fa.feature_prefix,
+        crate_name: parsed
+            .table
+            .package_name
+            .clone()
+            .unwrap_or_else(|| parsed.dep_key.clone()),
+        version_requirement: version.to_string(),
+        feature_prefix: fa.feature_prefix.clone(),
         range,
-        selected_features: fa.selected_features,
+        selected_features: fa.selected_features.clone(),
     })
+}
+
+fn get_crate_name_completion_context(
+    line_text: &str,
+    cursor_char: u32,
+) -> Option<CrateNameContext> {
+    if !is_typing_crate_name(line_text, cursor_char) {
+        return None;
+    }
+
+    let ctx = get_crate_name_context(line_text, cursor_char);
+    (ctx.prefix.len() >= 2).then_some(ctx)
+}
+pub fn get_completion_context(text: &str, line: u32, character: u32) -> Option<CompletionContext> {
+    if !is_in_dependencies_section(text, line) {
+        return None;
+    }
+
+    // 在内联表内：CrateName / SimpleVersion 不可能出现
+    if let Some(parsed) = parse_inline_dep(text, line, character) {
+        if let Some(ctx) = get_feature_completion_context(&parsed) {
+            return Some(CompletionContext::Feature(ctx));
+        }
+        return get_inline_version_context(&parsed).map(CompletionContext::Version);
+    }
+
+    // 不在内联表：Feature / InlineVersion 不可能出现
+    let line_text = text.lines().nth(line as usize).unwrap_or("");
+    if let Some(ctx) = get_crate_name_completion_context(line_text, character) {
+        return Some(CompletionContext::CrateName(ctx));
+    }
+    get_simple_version_context(text, line, character).map(CompletionContext::Version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context_at(text: &str) -> Option<CompletionContext> {
+        let marker = "<|>";
+        let offset = text.find(marker).expect("cursor marker must exist");
+        let prefix = &text[..offset];
+        let line = prefix.bytes().filter(|&b| b == b'\n').count() as u32;
+        let character = prefix.rsplit('\n').next().unwrap_or(prefix).len() as u32;
+
+        let mut clean = text.to_string();
+        clean.replace_range(offset..offset + marker.len(), "");
+
+        get_completion_context(&clean, line, character)
+    }
+
+    #[test]
+    fn returns_none_outside_dependencies_section() {
+        let text = r#"[package]
+na<|>me = "demo"
+"#;
+
+        assert!(context_at(text).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_short_crate_name_prefix() {
+        let text = r#"[dependencies]
+s<|>
+"#;
+
+        assert!(context_at(text).is_none());
+    }
+
+    #[test]
+    fn returns_crate_name_context_for_dependency_key_prefix() {
+        let text = r#"[dependencies]
+se<|>
+"#;
+
+        match context_at(text) {
+            Some(CompletionContext::CrateName(ctx)) => {
+                assert_eq!(ctx.prefix, "se");
+                assert_eq!(ctx.start_character, 0);
+                assert_eq!(ctx.end_character, 2);
+            }
+            other => panic!("expected crate-name context, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn returns_version_context_for_simple_dependency_string() {
+        let text = r#"[dependencies]
+serde = "1.<|>"
+"#;
+
+        match context_at(text) {
+            Some(CompletionContext::Version(ctx)) => {
+                assert_eq!(ctx.crate_name, "serde");
+                assert_eq!(ctx.version_prefix, "1.");
+            }
+            other => panic!("expected version context, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn returns_version_context_for_inline_dependency_version() {
+        let text = r#"[dependencies]
+serde = { version = "1.<|>" }
+"#;
+
+        match context_at(text) {
+            Some(CompletionContext::Version(ctx)) => {
+                assert_eq!(ctx.crate_name, "serde");
+                assert_eq!(ctx.version_prefix, "1.");
+            }
+            other => panic!("expected inline version context, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_version_uses_package_name_when_present() {
+        let text = r#"[dependencies]
+serde_json_alias = { package = "serde_json", version = "1.<|>" }
+"#;
+
+        match context_at(text) {
+            Some(CompletionContext::Version(ctx)) => {
+                assert_eq!(ctx.crate_name, "serde_json");
+                assert_eq!(ctx.version_prefix, "1.");
+            }
+            other => panic!("expected package-aware version context, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn returns_feature_context_for_inline_feature_array() {
+        let text = r#"[dependencies]
+serde = {
+  version = "1",
+  features = [
+    "alloc",
+    "de<|>"
+  ],
+}
+"#;
+
+        match context_at(text) {
+            Some(CompletionContext::Feature(ctx)) => {
+                assert_eq!(ctx.crate_name, "serde");
+                assert_eq!(ctx.version_requirement, "1");
+                assert_eq!(ctx.feature_prefix, "de");
+                assert_eq!(ctx.selected_features, vec!["alloc".to_string()]);
+            }
+            other => panic!("expected feature context, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recognizes_workspace_and_dev_dependency_sections() {
+        let workspace_text = r#"[workspace.dependencies]
+se<|>
+"#;
+        match context_at(workspace_text) {
+            Some(CompletionContext::CrateName(ctx)) => assert_eq!(ctx.prefix, "se"),
+            other => panic!("expected workspace crate-name context, got {other:?}"),
+        }
+
+        let dev_text = r#"[dev-dependencies]
+serde = "1.<|>"
+"#;
+        match context_at(dev_text) {
+            Some(CompletionContext::Version(ctx)) => {
+                assert_eq!(ctx.crate_name, "serde");
+                assert_eq!(ctx.version_prefix, "1.");
+            }
+            other => panic!("expected dev-dependency version context, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefers_feature_context_in_multiline_inline_dependency_with_comments() {
+        let text = r#"[dependencies]
+serde = { # comment
+  version = "1",
+  features = [
+    "alloc", # keep this selected
+    "de<|>"
+  ],
+}
+"#;
+
+        match context_at(text) {
+            Some(CompletionContext::Feature(ctx)) => {
+                assert_eq!(ctx.crate_name, "serde");
+                assert_eq!(ctx.feature_prefix, "de");
+                assert_eq!(ctx.selected_features, vec!["alloc".to_string()]);
+            }
+            other => panic!("expected feature context to win, got {other:?}"),
+        }
+    }
 }

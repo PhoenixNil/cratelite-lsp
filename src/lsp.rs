@@ -108,91 +108,81 @@ impl LanguageServer for Backend {
 
         let Position { line, character } = params.text_document_position.position;
 
-        // ── guard: must be in a [dependencies] section ─────────────────────
-        if !toml_context::is_in_dependencies_section(&text, line) {
+        let Some(context) = toml_context::get_completion_context(&text, line, character) else {
             return Ok(None);
-        }
+        };
 
-        //  1. Feature completions (inline table: `{ version = "…", features = ["…"] }`)
-        if let Some(ctx) = toml_context::get_feature_completion_context(&text, line, character) {
-            let features = self
-                .feature_index
-                .get_features(&ctx.crate_name, &ctx.version_requirement)
-                .await;
+        match context {
+            //Features completions
+            toml_context::CompletionContext::Feature(ctx) => {
+                let features = self
+                    .feature_index
+                    .get_features(&ctx.crate_name, &ctx.version_requirement)
+                    .await;
 
-            let items: Vec<CompletionItem> = features
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|f| f.starts_with(&ctx.feature_prefix))
-                .filter(|f| !ctx.selected_features.contains(f))
-                .map(|f| CompletionItem {
-                    label: f.clone(),
-                    kind: Some(CompletionItemKind::VALUE),
-                    text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                        range: ctx.range,
-                        new_text: f,
-                    })),
-                    ..Default::default()
-                })
-                .collect();
-
-            return Ok(Some(CompletionResponse::Array(items)));
-        }
-
-        //  2. Crate-name completions (typing the key on the left of `=`)
-        let line_text: &str = text.lines().nth(line as usize).unwrap_or("");
-        if toml_context::is_typing_crate_name(line_text, character) {
-            let ctx = toml_context::get_crate_name_context(line_text, character);
-            if ctx.prefix.len() >= 2 {
-                let results = self.crate_index.search(&ctx.prefix, 30).await;
-                let items: Vec<CompletionItem> = results
+                let items: Vec<CompletionItem> = features
+                    .unwrap_or_default()
                     .into_iter()
-                    .map(|e| {
-                        let insert = e.name.clone();
-                        CompletionItem {
-                            label: e.name.clone(),
-                            kind: Some(CompletionItemKind::MODULE),
-                            detail: Some(format!("v{}", e.version)),
-                            sort_text: Some(format!("{:08}", e.rank)), //  0 padded rank for sorting, 8 digits
-                            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                                range: Range::new(
-                                    Position::new(line, ctx.start_character),
-                                    Position::new(line, ctx.end_character),
-                                ),
-                                new_text: insert,
-                            })),
-                            ..Default::default()
-                        }
-                    })
-                    .collect();
-                return Ok(Some(CompletionResponse::List(CompletionList {
-                    is_incomplete: true,
-                    items,
-                })));
-            }
-            return Ok(None);
-        }
-
-        // 3. Version-string completion (inline: `{ version = "…" }` or simple: `crate = "…"`)
-        if let Some(ctx) = toml_context::get_inline_version_context(&text, line, character)
-            .or_else(|| toml_context::get_version_context(&text, line, character))
-        {
-            if let Some(version) = self.crate_index.get_latest_version(&ctx.crate_name).await {
-                if version.starts_with(&ctx.version_prefix) {
-                    let item = CompletionItem {
-                        label: version.clone(),
+                    .filter(|f| f.starts_with(&ctx.feature_prefix))
+                    .filter(|f| !ctx.selected_features.contains(f))
+                    .map(|f| CompletionItem {
+                        label: f.clone(),
                         kind: Some(CompletionItemKind::VALUE),
                         text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                             range: ctx.range,
-                            new_text: version,
+                            new_text: f,
                         })),
                         ..Default::default()
-                    };
-                    return Ok(Some(CompletionResponse::Array(vec![item])));
+                    })
+                    .collect();
+
+                Ok(Some(CompletionResponse::Array(items)))
+            }
+            // Crate name completions
+            toml_context::CompletionContext::CrateName(ctx) => {
+                let results = self.crate_index.search(&ctx.prefix, 30).await;
+                let items: Vec<CompletionItem> = results
+                    .into_iter()
+                    .map(|e| CompletionItem {
+                        label: e.name.clone(),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some(format!("v{}", e.version)),
+                        sort_text: Some(format!("{:08}", e.rank)),
+                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                            range: Range::new(
+                                Position::new(line, ctx.start_character),
+                                Position::new(line, ctx.end_character),
+                            ),
+                            new_text: e.name,
+                        })),
+                        ..Default::default()
+                    })
+                    .collect();
+
+                Ok(Some(CompletionResponse::List(CompletionList {
+                    is_incomplete: true,
+                    items,
+                })))
+            }
+            // Version completions
+            toml_context::CompletionContext::Version(ctx) => {
+                if let Some(version) = self.crate_index.get_latest_version(&ctx.crate_name).await {
+                    if version.starts_with(&ctx.version_prefix) {
+                        let item = CompletionItem {
+                            label: version.clone(),
+                            kind: Some(CompletionItemKind::VALUE),
+                            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                                range: ctx.range,
+                                new_text: version,
+                            })),
+                            ..Default::default()
+                        };
+                        return Ok(Some(CompletionResponse::Array(vec![item])));
+                    }
                 }
+
+                Ok(None)
             }
         }
-
-        Ok(None)
     }
 }
